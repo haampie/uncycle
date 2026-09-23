@@ -31,9 +31,12 @@ Use `--baseline` to see whether a new commit or version regresses the number of 
 
 ```console
 $ uncycle Werkzeug-2.2.0/src/werkzeug --baseline Werkzeug-2.1.2/src/werkzeug
+Werkzeug-2.2.0/src/werkzeug/http.py:1304: imports werkzeug.datastructures
 Werkzeug-2.2.0/src/werkzeug/http.py:1305: imports werkzeug.sansio.http
 dependencies to remove increased from 1 to 2
 ```
+
+The import statements that still have to go are listed either way; in red the ones this version added.
 
 This check is useful in CI:
 
@@ -56,7 +59,7 @@ pip install uncycle
 
 - `--exclude REGEX`: exclude certain modules, for example: `'^app\.(vendor|tests)\b'`.
 - `--inline`: also count imports inside functions and classes.
-- `--baseline OLD`: an older version of the package. Lists the import statements this version added to the problem, and exits 1 if more dependencies have to go than before.
+- `--baseline OLD`: an older version of the package. Lists the import statements that still have to go, highlights the ones this version added, and exits 1 if more dependencies have to go than before.
 - `--dump-graph FILE`: write the import graph to `FILE` (`-` for stdout) instead of solving it.
 - `--format json|text`: format of the dumped graph. Defaults to `text` when `FILE` ends in `.txt`, otherwise `json`.
 

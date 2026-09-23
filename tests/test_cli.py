@@ -112,14 +112,17 @@ def test_a_syntax_error_names_the_path_and_line(tree, run, capsys, monkeypatch):
 
 
 def test_compare_unchanged(tree, run, capsys):
-    """Only the count: the current solution is arbitrary and blames nothing new."""
+    """What is left is listed, and the count."""
     d = tree(CYCLE)
     assert run(d, "--baseline", d) == 0
-    assert capsys.readouterr().out == "dependencies to remove unchanged at 1\n"
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert re.search(r"pkg/[ab]\.py:1: imports pkg\.[ab]$", lines[0])
+    assert lines[1] == "dependencies to remove unchanged at 1"
 
 
 def test_compare_improved_with_cycles_left(tmp_path, run, capsys):
-    """Statements that still have to go are not listed as if the change added them."""
+    """Statements that still have to go are listed."""
     for name, source in {
         "old/pkg/__init__.py": "",
         "old/pkg/a.py": "import pkg.b",
@@ -139,7 +142,10 @@ def test_compare_improved_with_cycles_left(tmp_path, run, capsys):
         run(str(tmp_path / "new" / "pkg"), "--baseline", str(tmp_path / "old" / "pkg"))
         == 0
     )
-    assert capsys.readouterr().out == "dependencies to remove decreased from 2 to 1\n"
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert re.search(r"new/pkg/[cd]\.py:1: imports pkg\.[cd]$", lines[0])
+    assert lines[1] == "dependencies to remove decreased from 2 to 1"
 
 
 def test_compare_improved(tmp_path, run, capsys):
@@ -180,6 +186,38 @@ def test_compare_worse(tmp_path, run, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert re.search(r"new/pkg/[ab]\.py:1: imports pkg\.[ab]$", lines[0])
     assert lines[-1] == "dependencies to remove increased from 0 to 1"
+
+
+def test_compare_worse_lists_what_was_left_too(tmp_path, run, capsys, monkeypatch):
+    """The old cycle's statement is listed plain, the new cycle's in red."""
+    for name, source in {
+        "old/pkg/__init__.py": "",
+        "old/pkg/a.py": "import pkg.b",
+        "old/pkg/b.py": "import pkg.a",
+        "old/pkg/c.py": "",
+        "old/pkg/d.py": "",
+        "new/pkg/__init__.py": "",
+        "new/pkg/a.py": "import pkg.b",
+        "new/pkg/b.py": "import pkg.a",
+        "new/pkg/c.py": "import pkg.d",
+        "new/pkg/d.py": "import pkg.c",
+    }.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("GITHUB_ACTIONS", "1")
+    assert (
+        run(str(tmp_path / "new" / "pkg"), "--baseline", str(tmp_path / "old" / "pkg"))
+        == 1
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert re.fullmatch(r"\S*new/pkg/[ab]\.py:1: imports pkg\.[ab]", lines[0])
+    assert re.fullmatch(
+        r"\033\[31m\S*new/pkg/[cd]\.py:1: imports pkg\.[cd]\033\[0m", lines[1]
+    )
+    assert "dependencies to remove increased from 1 to 2" in lines[2]
 
 
 def test_compare_when_a_blamed_edge_is_gone(tmp_path, run, capsys):

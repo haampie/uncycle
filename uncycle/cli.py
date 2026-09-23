@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 
 from .fas import minimum_feedback_arc_set
 from .graph import Edge, Graph, build_graph
@@ -31,24 +31,32 @@ def display(path: str) -> str:
     return path if relative.startswith("..") else relative
 
 
-def lines(graph: Graph, edges: Iterable[Edge]) -> list[str]:
+def keyed_lines(graph: Graph, edges: Iterable[Edge]) -> list[tuple[str, Edge]]:
     """One ``path:line: imports module`` line per import statement behind the given edges,
-    in file order; ``module: imports module`` for a graph that has no locations."""
-    keyed: list[tuple[tuple[str, int, str], str]] = []
+    in file order, with its edge; ``module: imports module`` for a graph that has no
+    locations."""
+    keyed: list[tuple[tuple[str, int, str], str, Edge]] = []
     for edge in edges:
         src, dst = graph.names([edge])[0]
         where = graph.locations.get(edge)
         if not where:
-            keyed.append(((src, 0, dst), f"{src}: imports {dst}"))
+            keyed.append(((src, 0, dst), f"{src}: imports {dst}", edge))
         for path, line in where or ():
             shown = display(path)
-            keyed.append(((shown, line, dst), f"{shown}:{line}: imports {dst}"))
-    return [text for _, text in sorted(keyed)]
+            keyed.append(((shown, line, dst), f"{shown}:{line}: imports {dst}", edge))
+    return [(text, edge) for _, text, edge in sorted(keyed)]
 
 
-def print_lines(graph: Graph, edges: Iterable[Edge], *codes: str) -> None:
-    for line in lines(graph, edges):
-        print(colorize(line, *codes))
+def lines(graph: Graph, edges: Iterable[Edge]) -> list[str]:
+    return [text for text, _ in keyed_lines(graph, edges)]
+
+
+def print_lines(
+    graph: Graph, edges: Iterable[Edge], blamed: Collection[Edge] = ()
+) -> None:
+    """Print the import statements behind the edges, those behind ``blamed`` in red."""
+    for line, edge in keyed_lines(graph, edges):
+        print(colorize(line, RED) if edge in blamed else line)
 
 
 def dependencies(n: int) -> str:
@@ -66,15 +74,15 @@ def summary(graph: Graph, fas: Iterable[Edge]) -> str:
 
 
 def compare(old: Graph, new: Graph) -> int:
-    """Print the import statements this change added to the solution, and the count."""
+    """Print the import statements that still have to go, those this change added in red,
+    and how the count changed."""
     old_fas = minimum_feedback_arc_set(old)
     new_fas = minimum_feedback_arc_set(new)
     before, after = len(old_fas), len(new_fas)
     difference = after - before
 
     if difference <= 0:
-        # Nothing to blame. Listing the new solution would mislead: it is one of many
-        # optimal ones, and mostly names statements this change did not touch.
+        print_lines(new, new_fas)
         if difference == 0:
             change = f"dependencies to remove unchanged at {after}"
         else:
@@ -85,16 +93,22 @@ def compare(old: Graph, new: Graph) -> int:
     # Solve the new graph again without the edges the old solution already blamed, so what is
     # left to blame is what this change introduced. A heuristic: the old solution is not
     # necessarily a subset of the new graph's edges.
-    excluded = set(new.indices(old.names(old_fas)))
-    blamed = minimum_feedback_arc_set(
-        Graph(new.nodes, [e for e in new.edges if e not in excluded], new.locations)
+    kept = set(new.indices(old.names(old_fas)))
+    blamed = set(
+        minimum_feedback_arc_set(
+            Graph(new.nodes, [e for e in new.edges if e not in kept], new.locations)
+        )
     )
-    print_lines(new, blamed, RED)
 
-    # Breaking exactly those is not necessarily the cheapest way back to the old count.
     if len(blamed) > difference:
+        # Breaking exactly those is not the cheapest way back to the old count.
+        print_lines(new, blamed, blamed)
         print(f"removing any {difference} of the following would undo the increase:")
-        print_lines(new, new_fas, GREY)
+        print_lines(new, new_fas)
+    else:
+        # At most before + difference = after edges that break every cycle: a minimum
+        # solution, with what this change added in red.
+        print_lines(new, blamed | kept, blamed)
     change = f"dependencies to remove increased from {before} to {after}"
     print(colorize(change, RED, BOLD))
     return 1
@@ -142,8 +156,9 @@ def main() -> int:
     parser.add_argument(
         "--baseline",
         metavar="OLD",
-        help="an older version of the package: list the import statements this version "
-        "added to the problem, and exit 1 if more dependencies have to go than before",
+        help="an older version of the package: list the import statements that still have "
+        "to go, highlight the ones this version added, and exit 1 if more dependencies "
+        "have to go than before",
     )
     parser.add_argument(
         "--dump-graph",
@@ -176,7 +191,7 @@ def main() -> int:
             )
 
         fas = minimum_feedback_arc_set(graph)
-        print_lines(graph, fas, GREY)
+        print_lines(graph, fas)
         print(colorize(summary(graph, fas), BOLD))
         return 0
     except SyntaxError as e:

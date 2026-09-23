@@ -4,7 +4,7 @@ from .fas import minimum_feedback_arc_set
 from .graph import Edge, Graph, build_graph
 from .io import FORMATS, read_graph, write_graph
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "FORMATS",
