@@ -52,7 +52,7 @@ def test_from_subpackage_import_submodule(tree):
             "pkg/m.py": "from .sub import y",
         }
     )
-    assert edges(build_graph(d)) == {("pkg.m", "pkg.sub.y")}
+    assert edges(build_graph(d)) == {("pkg.m", "pkg.sub"), ("pkg.m", "pkg.sub.y")}
 
 
 def test_from_subpackage_import_attribute(tree):
@@ -185,6 +185,63 @@ def test_names_from_star_imports_are_attributes_of_the_package(tree):
     }
 
 
+def test_a_star_import_brings_in_what_a_literal_all_lists(tree):
+    """scipy.fftpack: _pseudo_diffs.py imports the compiled convolve submodule, but leaves
+    it out of __all__, so the package does not bind it."""
+    d = tree(
+        {
+            "pkg/__init__.py": "from ._impl import *",
+            "pkg/_impl.py": "from . import convolve\n__all__ = ['diff']\ndef diff(): pass",
+            "pkg/m.py": "from pkg import diff",
+        }
+    )
+    assert edges(build_graph(d)) == {
+        ("pkg", "pkg._impl"),
+        ("pkg._impl", "pkg.convolve"),
+        ("pkg.m", "pkg"),
+    }
+
+
+@pytest.mark.parametrize(
+    "exports",
+    [
+        "__all__ = ['_private']",
+        "__all__ = ('_private',)",
+        "__all__: list[str] = ['_private']",
+        "__all__ = []\n__all__ += ['_private']",
+        "if x:\n    __all__ = ['_private']\nelse:\n    __all__ = ['other']",
+    ],
+)
+def test_a_literal_all_can_export_a_private_name(tree, exports):
+    d = tree(
+        {
+            "pkg/__init__.py": "from ._impl import *",
+            "pkg/_impl.py": f"{exports}\n_private = 1",
+            "pkg/m.py": "from pkg import _private",
+        }
+    )
+    assert ("pkg.m", "pkg") in edges(build_graph(d))
+
+
+@pytest.mark.parametrize(
+    "exports",
+    [
+        "__all__ = [n for n in dir() if n.islower()]",
+        "__all__ = ['diff']\n__all__ += other.__all__",
+        "__all__ = ['diff']\n__all__.extend(other.__all__)",
+    ],
+)
+def test_a_computed_all_brings_in_the_public_names(tree, exports):
+    d = tree(
+        {
+            "pkg/__init__.py": "from ._impl import *",
+            "pkg/_impl.py": f"import other\n{exports}\ndef convolve(): pass",
+            "pkg/m.py": "from pkg import convolve",
+        }
+    )
+    assert ("pkg.m", "pkg") in edges(build_graph(d))
+
+
 def test_circular_star_imports_terminate(tree):
     d = tree(
         {
@@ -231,17 +288,49 @@ def test_import_as_ignores_the_alias(tree):
     assert edges(build_graph(d)) == {("pkg.m", "pkg.e")}
 
 
-def test_dotted_import_records_one_edge(tree):
-    """``import pkg.a.b`` runs pkg/a/__init__.py too, but only the leaf edge is recorded."""
+@pytest.mark.parametrize("statement", ["import pkg.a.b", "from pkg.a.b import x"])
+def test_an_import_depends_on_the_packages_it_runs(tree, statement):
+    """``import pkg.a.b`` runs pkg/a/__init__.py too. pkg/__init__.py has run before pkg.m,
+    so that is no edge."""
     d = tree(
         {
             "pkg/__init__.py": "",
             "pkg/a/__init__.py": "",
             "pkg/a/b.py": "",
-            "pkg/m.py": "import pkg.a.b",
+            "pkg/m.py": statement,
         }
     )
-    assert edges(build_graph(d)) == {("pkg.m", "pkg.a.b")}
+    assert edges(build_graph(d)) == {("pkg.m", "pkg.a"), ("pkg.m", "pkg.a.b")}
+
+
+def test_a_cycle_through_the_init_of_a_package_in_between(tree):
+    """Importing pkg.b first fails: pkg.sub runs before pkg.sub.m, and imports B from the
+    partially initialized pkg.b."""
+    d = tree(
+        {
+            "pkg/__init__.py": "",
+            "pkg/b.py": "from pkg.sub.m import M\nclass B: pass",
+            "pkg/sub/__init__.py": "from pkg.b import B",
+            "pkg/sub/m.py": "class M: pass",
+        }
+    )
+    assert edges(build_graph(d)) == {
+        ("pkg.b", "pkg.sub"),
+        ("pkg.b", "pkg.sub.m"),
+        ("pkg.sub", "pkg.b"),
+    }
+
+
+def test_importing_a_sibling_through_the_parent_is_no_cycle(tree):
+    """``from pkg import a`` in pkg.b runs pkg/__init__.py, which already ran before pkg.b."""
+    d = tree(
+        {
+            "pkg/__init__.py": "from . import b",
+            "pkg/a.py": "",
+            "pkg/b.py": "from pkg import a",
+        }
+    )
+    assert edges(build_graph(d)) == {("pkg", "pkg.b"), ("pkg.b", "pkg.a")}
 
 
 def test_relative_import_from_the_parent_package(tree):

@@ -88,6 +88,36 @@ def _statements(tree: ast.AST, inline: bool) -> Iterator[tuple[ast.AST, bool]]:
                 stack.extend((child, top) for child in getattr(node, field, ()))
 
 
+def _literal_names(value: ast.expr | None) -> list[str] | None:
+    """The strings in a list or tuple literal like ``["a", "b"]``, else ``None``."""
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return None
+    names = [
+        e.value
+        for e in value.elts
+        if isinstance(e, ast.Constant) and isinstance(e.value, str)
+    ]
+    return names if len(names) == len(value.elts) else None
+
+
+def _all_update(node: ast.AST) -> tuple[bool, list[str] | None]:
+    """Whether a statement changes ``__all__``, and if so the literal names it adds, or
+    ``None`` when it computes them."""
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets):
+            return True, _literal_names(node.value)
+    elif (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "__all__"
+    ):
+        return True, None  # __all__.extend(...), __all__.append(...) and the like
+    return False, None
+
+
 def _stored(target: ast.expr) -> Iterator[str]:
     """The names an assignment target binds: ``a`` and ``b`` in ``a, (b, c.d) = ...``."""
     for node in ast.walk(target):
@@ -136,6 +166,9 @@ class _Module:
     bound: set[str] = dataclasses.field(default_factory=set)
     #: modules star-imported at module level
     stars: list[str] = dataclasses.field(default_factory=list)
+    #: what a star import of this module brings in: the names of a literal ``__all__``, or
+    #: ``None`` if there is none or it is computed
+    exports: set[str] | None = None
 
 
 def scan_module(
@@ -147,10 +180,19 @@ def scan_module(
         tree = ast.parse(f.read(), filename=path)
     module = _Module(path, is_package)
     package = name if is_package else name.rpartition(".")[0]
+    # the union of every literal __all__ assignment, as either branch of an if may run
+    exports: set[str] | None = set()
+    has_all = False
 
     for node, top in _statements(tree, inline):
         if top:
             module.bound.update(_bound(node))
+            changes_all, names = _all_update(node)
+            if changes_all:
+                has_all = True
+                exports = (
+                    None if names is None or exports is None else exports | set(names)
+                )
         if isinstance(node, ast.Import):
             # import statements are always absolute
             for alias in node.names:
@@ -175,6 +217,8 @@ def scan_module(
                 # attribute the package defines
                 elif alias.asname or src != name:
                     module.bound.add(alias.asname or alias.name)
+    if has_all:
+        module.exports = exports
     return module
 
 
@@ -228,11 +272,13 @@ def build_graph(
             if "__getattr__" in names:
                 names.add(_ANY)
             for star in modules[name].stars:
-                if star in modules:
-                    # what a star import brings in, taking __all__ to be absent
-                    names |= {n for n in namespace(star) if not n.startswith("_")}
-                else:
+                if star not in modules:
                     names.add(_ANY)
+                elif (exports := modules[star].exports) is not None:
+                    names |= exports
+                else:
+                    # without a literal __all__, a star import brings in the public names
+                    names |= {n for n in namespace(star) if not n.startswith("_")}
         return namespaces[name]
 
     def target(module: str, attr: str | None) -> str:
@@ -265,6 +311,17 @@ def build_graph(
             # a self-loop is a cycle no reshuffling of imports can break
             if dst != name and keep(dst):
                 lines.setdefault((name, dst), set()).add(line)
+            # importing a.b.c runs a/b/__init__.py too, unless that is the importer or one
+            # of its own packages, which ran before it
+            parts = dst.split(".")
+            for i in range(1, len(parts)):
+                above = ".".join(parts[:i])
+                if (
+                    above in modules
+                    and keep(above)
+                    and not f"{name}.".startswith(f"{above}.")
+                ):
+                    lines.setdefault((name, above), set()).add(line)
 
     nodes = sorted(set(modules) | {dst for _, dst in lines})
     index = {node: i for i, node in enumerate(nodes)}
